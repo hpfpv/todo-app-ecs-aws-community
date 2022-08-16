@@ -27,7 +27,7 @@ sed -i '.old' "s/REPLACE_ME_APP_URL/$URL/g" backend/core-resources/core-resource
 
 ```
 TODO_ECR_REPO=todo-app-ecs
-AWS_ACCOUNT_ID=601091111123
+AWS_ACCOUNT_ID=REPLACE_ME_ACCOUNT_ID
 
 # Main service
 cd backend/main-service
@@ -109,5 +109,25 @@ aws cloudformation describe-stacks --stack-name $TODO_ECR_REPO --region $REGION 
 
 ```
 aws s3 cp frontend s3://todo-app-ecs-web-aug-2708 --recursive --exclude "*.DS_Store" --region=$REGION
+
+```
+
+## Pipeline CI/CD - GitHub Actions
+
+**Créer un utilisateur IAM avec les bonnes permissions sur les resources à déployer/mettre à jour**
+
+```
+AWS_ACCOUNT_ID=REPLACE_ME_ACCOUNT_ID
+
+# Créer l'utilisateur
+aws iam create-user --user-name github-ecs-aug
+
+# Associer la permission Administrator (non recommandé - toujours utiliser le moins de permissions requises)
+aws iam attach-user-policy --user-name github-ecs-aug --policy-arn "arn:aws:iam::aws:policy/AdministratorAccess"
+
+# Créer un Access Key pour l'utilisateur
+aws iam create-access-key --user-name github-ecs-aug > access-key.json
+
+# !!! Supprimer le fichier contenant le Access Key après utilisation
 
 ```
