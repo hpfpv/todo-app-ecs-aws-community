@@ -84,7 +84,7 @@ Ici, les resources Frontend (S3, CloudFront) sont créées par un stack CloudFor
 
 ```
 # Remplacer le ID certificate dans le fichier CloudFormation
-CERTIFICATE_ID=d7f00780-5af8-463d-8185-65a4bb10a771
+CERTIFICATE_ID=REPLACE_ME_CERTIFICATE_ID
 sed -i '.old' "s/REPLACE_ME_CERTIFICATE_ID/$CERTIFICATE_ID/g" core-resources/core-website.yaml
 
 # Remplacer l'URL du site web dans le fichier CloudFormation
