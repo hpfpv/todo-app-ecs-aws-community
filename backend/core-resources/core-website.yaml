@@ -1,0 +1,74 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: This stack deploys the s3 bucket, cdn and oai for todo app ecs website.
+
+Resources:
+# S3 bucket for web static files
+  TodoEcsWebBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: 'todo-app-ecs-web-aug-2708'
+  
+  TodoEcsWebBucketOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties: 
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Join ['', ['access-identity-', !Ref TodoEcsWebBucket, '.s3.amazonaws.com'] ]
+
+  TodoEcsWebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TodoEcsWebBucket
+      PolicyDocument:  
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource: !Join ['', [!GetAtt 'TodoEcsWebBucket.Arn', '/*'] ]
+            Principal: 
+              AWS: !Sub 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${TodoEcsWebBucketOAI}'
+
+  TodoEcsWebBucketCF:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: TodoEcsWebBucket
+    Properties:
+      DistributionConfig:
+        Aliases: 
+          - "REPLACE_ME_APP_URL"
+        Comment: !Join ['', ['CDN for ', !Ref TodoEcsWebBucket] ]
+        Enabled: True
+        DefaultRootObject: 'index.html'
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - HEAD
+            - DELETE
+            - POST
+            - GET
+            - OPTIONS
+            - PUT
+            - PATCH
+          ForwardedValues:
+            QueryString: False
+          TargetOriginId: !Join ['', [!Ref 'TodoEcsWebBucket', '.s3.', !Sub "${AWS::Region}", '.amazonaws.com'] ]
+          ViewerProtocolPolicy: redirect-to-https
+        Origins:
+          - S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${TodoEcsWebBucketOAI}'
+            DomainName: !Join ['', [!Ref 'TodoEcsWebBucket', '.s3.', !Sub "${AWS::Region}", '.amazonaws.com'] ]
+            Id: !Join ['', [!Ref 'TodoEcsWebBucket', '.s3.', !Sub "${AWS::Region}", '.amazonaws.com'] ]
+        ViewerCertificate:
+          SslSupportMethod: 'sni-only'
+          AcmCertificateArn: !Join [ '', ['arn:aws:acm:us-east-1:', !Ref 'AWS::AccountId', ':certificate/REPLACE_ME_CERTIFICATE_ID' ] ]
+
+Outputs:
+  TodoEcsWebBucket:
+    Value: !Ref 'TodoEcsWebBucket' 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoEcsWebBucket"
+  TodoEcsWebBucketCFDomainName:
+    Value: !GetAtt 'TodoEcsWebBucketCF.DomainName' 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoEcsWebBucketCFDomainName"

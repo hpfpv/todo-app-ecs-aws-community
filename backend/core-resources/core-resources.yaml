@@ -1,0 +1,1685 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: This stack deploys the core infrastructure and ECS service 
+             and task definition to be used for todo app ecs main service.
+
+Mappings: 
+  RegionMap: 
+    af-south-1: 
+      ami: "ami-074400ecdf5eaa354"
+    ca-central-1: 
+      ami: "ami-03e6eb48311b78d14"
+    eu-central-1:
+      ami: "ami-006aeb802a1a7862a"
+    eu-west-3: 
+      ami: "ami-0f51be0cf2e87b06c"
+    us-east-1: 
+      ami: "ami-040d909ea4e56f8f3"
+    us-west-1: 
+      ami: "ami-091c5e73d3a79e85e"
+    
+Resources:
+# Core network
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+
+  PublicOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Sub '${AWS::Region}a'
+      CidrBlock: 10.0.10.0/24
+      MapPublicIpOnLaunch: true
+
+  PublicTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Sub '${AWS::Region}b'
+      CidrBlock: 10.0.20.0/24
+      MapPublicIpOnLaunch: true
+
+  PrivateOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Sub '${AWS::Region}a'
+      CidrBlock: 10.0.30.0/24
+      MapPublicIpOnLaunch: false
+
+  PrivateTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Sub '${AWS::Region}b'
+      CidrBlock: 10.0.40.0/24
+      MapPublicIpOnLaunch: false
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-igw"
+        - Key: Network
+          Value: Public
+
+  GatewayToInternet:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Network
+          Value: Public
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayToInternet
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicOne
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicTwo
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: NatPublicIP
+    Properties: 
+      AllocationId: !GetAtt NatPublicIP.AllocationId
+      SubnetId: !Ref PublicOne
+
+  NatPublicIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPC
+    Properties:
+      Domain: vpc
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Network
+          Value: Private
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateOne
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateTwo
+      RouteTableId: !Ref PrivateRouteTable
+
+
+# Extra components (Cognito, DynamoDB, S3...)
+  TodoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub 'UserPool-${AWS::StackName}'
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+  
+  TodoUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: !Sub 'UserPoolClient-${AWS::StackName}'
+        AllowedOAuthFlows:
+          - implicit
+        AllowedOAuthFlowsUserPoolClient: true
+        AllowedOAuthScopes:
+          - phone
+          - email
+          - openid
+          - profile
+          - aws.cognito.signin.user.admin
+        UserPoolId: !Ref TodoUserPool
+        CallbackURLs: 
+          - https://REPLACE_ME_APP_URL
+        ExplicitAuthFlows:
+          - ALLOW_USER_SRP_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        GenerateSecret: false
+        SupportedIdentityProviders: 
+          - COGNITO
+  
+  TodoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain 
+    Properties:
+      UserPoolId: !Ref TodoUserPool
+      Domain: !Sub 'auth-${AWS::StackName}'
+  
+  TodoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'TodoTable-${AWS::StackName}'
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      AttributeDefinitions: 
+        - AttributeName: "todoID"
+          AttributeType: "S"
+        - AttributeName: "userID"
+          AttributeType: "S"
+      KeySchema: 
+        - AttributeName: "todoID"
+          KeyType: "HASH"
+      GlobalSecondaryIndexes:
+        - IndexName: "userIDIndex"
+          KeySchema:
+            - AttributeName: "userID"
+              KeyType: "HASH"
+            - AttributeName: "todoID"
+              KeyType: "RANGE"
+          Projection: 
+            ProjectionType: "ALL"
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
+
+  TodoFilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'TodoFilesTable-${AWS::StackName}'
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      AttributeDefinitions: 
+        - AttributeName: "fileID"
+          AttributeType: "S"
+        - AttributeName: "todoID"
+          AttributeType: "S"
+      KeySchema: 
+        - AttributeName: "fileID"
+          KeyType: "HASH"
+      GlobalSecondaryIndexes:
+        - IndexName: "todoIDIndex"
+          KeySchema:
+            - AttributeName: "todoID"
+              KeyType: "HASH"
+            - AttributeName: "fileID"
+              KeyType: "RANGE"
+          Projection: 
+            ProjectionType: "ALL"
+          ProvisionedThroughput:
+            ReadCapacityUnits: 1
+            WriteCapacityUnits: 1
+
+  # S3 bucket to store todos files
+  TodoFilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'todo-app-files-aug-2708' 
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - HEAD
+            AllowedOrigins:
+              - 'https://REPLACE_ME_APP_URL'
+  
+  TodoFilesBucketOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties: 
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Join ['', ['access-identity-', !Ref TodoFilesBucket, '.s3.amazonaws.com'] ]
+
+  TodoFilesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TodoFilesBucket
+      PolicyDocument:  
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource: !Join ['', [!GetAtt 'TodoFilesBucket.Arn', '/*'] ]
+            Principal: 
+              AWS: !Sub 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${TodoFilesBucketOAI}'
+
+  TodoFilesBucketCF:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Join ['', ['CDN for ', !Ref TodoFilesBucket] ]
+        Enabled: True
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - HEAD
+            - DELETE
+            - POST
+            - GET
+            - OPTIONS
+            - PUT
+            - PATCH
+          ForwardedValues:
+            QueryString: False
+          TargetOriginId: !Join ['', [!Ref 'TodoFilesBucket', '.s3.', !Sub "${AWS::Region}", '.amazonaws.com'] ]
+          ViewerProtocolPolicy: redirect-to-https
+        Origins:
+          - S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${TodoFilesBucketOAI}'
+            DomainName: !Join ['', [!Ref 'TodoFilesBucket', '.s3.', !Sub "${AWS::Region}", '.amazonaws.com'] ]
+            Id: !Join ['', [!Ref 'TodoFilesBucket', '.s3.', !Sub "${AWS::Region}", '.amazonaws.com'] ]
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: True
+
+  TodoIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub 'IdentityPool_todo_app'
+      AllowUnauthenticatedIdentities: True
+              
+  TodoIdentityPoolRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'identity-pool-role-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal: 
+              Federated: 
+                - "cognito-identity.amazonaws.com"
+            Action: "sts:AssumeRoleWithWebIdentity"
+            Condition: { "ForAnyValue:StringLike": {"cognito-identity.amazonaws.com:amr": "unauthenticated" },  "StringEquals": {"cognito-identity.amazonaws.com:aud": !Ref TodoIdentityPool}}
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub 'identity-pool-role-policy-${AWS::StackName}'
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: 
+                  - "s3:ListBucket"
+                  - "s3:PutObject*"
+                  - "s3:GetObject*"
+                Resource :
+                  - !GetAtt 'TodoFilesBucket.Arn'
+                  - !Join ['', [!GetAtt 'TodoFilesBucket.Arn', '/*']]
+
+  TodoIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties: 
+      IdentityPoolId: !Ref TodoIdentityPool
+      Roles: {"unauthenticated": !GetAtt TodoIdentityPoolRole.Arn }
+
+
+# ECS cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}-EcsCluster'
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB Security Group
+      VpcId: !Ref VPC
+
+  EcsContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the ECS containers from the Internet
+      VpcId: !Ref VPC
+
+  ALBSecurityGroupHTTPinbound:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: 0.0.0.0/0
+
+  EcsSecurityGroupALBports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsContainerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 31000
+      ToPort: 61000
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+  
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [!Ref 'AWS::StackName', 'logs'] ]
+      RetentionInDays: 14
+
+  EcsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join [ '-', [ !Ref 'AWS::StackName', 'EcsServiceRole'] ]
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ecs.amazonaws.com
+            - ecs-tasks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              # Rules which allow ECS to attach network interfaces to instances
+              # on your behalf in order for awsvpc networking mode to work right
+              - 'ec2:AttachNetworkInterface'
+              - 'ec2:CreateNetworkInterface'
+              - 'ec2:CreateNetworkInterfacePermission'
+              - 'ec2:DeleteNetworkInterface'
+              - 'ec2:DeleteNetworkInterfacePermission'
+              - 'ec2:Describe*'
+              - 'ec2:DetachNetworkInterface'
+
+              # Rules which allow ECS to update load balancers on your behalf
+              # with the information sabout how to send traffic to your containers
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+
+              # Rules which allow ECS to run tasks that have IAM roles assigned to them.
+              - 'iam:PassRole'
+
+              # Rules that let ECS interact with container images.
+              - 'ecr:GetAuthorizationToken'
+              - 'ecr:BatchCheckLayerAvailability'
+              - 'ecr:GetDownloadUrlForLayer'
+              - 'ecr:BatchGetImage'
+
+              # Rules that let ECS create and push logs to CloudWatch.
+              - 'logs:DescribeLogStreams'
+              - 'logs:CreateLogStream'
+              - 'logs:CreateLogGroup'
+              - 'logs:PutLogEvents'
+            Resource: '*'
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join [ '-', [ !Ref 'AWS::StackName', 'EcsTaskRole'] ]
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskRolePolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Allow the ECS Tasks to download images from ECR
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+
+                # Allow the ECS tasks to upload logs to CloudWatch
+                - 'logs:CreateLogStream'
+                - 'logs:CreateLogGroup'
+                - 'logs:PutLogEvents'
+              Resource: '*'
+
+            - Effect: Allow
+              Action:
+                # Allows the ECS tasks to interact with only the resources
+                # in DynamoDB and S3
+                - 'dynamodb:*'
+                - 's3:PutObject'
+                - 's3:GetObject'
+                - 's3:DeleteObject'
+                - 's3:ListBucket'
+              Resource: 
+                - !GetAtt 'TodoTable.Arn' 
+                - !Join [ '', [ !GetAtt 'TodoTable.Arn' , '/index/*' ] ]
+                - !GetAtt 'TodoFilesTable.Arn' 
+                - !Join [ '', [ !GetAtt 'TodoFilesTable.Arn' , '/index/*' ] ]
+                - !GetAtt 'TodoFilesBucket.Arn' 
+                - !Join [ '', [!GetAtt 'TodoFilesBucket.Arn' , '/*']]
+
+  EcsTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${AWS::StackName}-task-definition'
+      #NetworkMode: 'awsvpc'
+      ExecutionRoleArn: !Ref EcsServiceRole
+      TaskRoleArn: !Ref ECSTaskRole
+      RequiresCompatibilities: 
+        - EC2
+      ContainerDefinitions:
+        - Name: !Sub '${AWS::StackName}-main-service'
+          Cpu: 20
+          Essential: True
+          Image: !Join [ '', [!Ref "AWS::AccountId", ".dkr.ecr.", !Ref 'AWS::Region', '.amazonaws.com/', !Ref 'AWS::StackName', '/todo-main-service:latest']]
+          Memory: 200
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudwatchLogsGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: !Sub '${AWS::StackName}-main-service'
+          PortMappings:
+            - ContainerPort: 8080
+          Environment:
+            - Name: TODO_TABLE
+              Value: !Ref TodoTable
+            - Name: TODOFILES_TABLE
+              Value: !Ref TodoFilesTable 
+            - Name: TODOFILES_BUCKET
+              Value: !Ref 'TodoFilesBucket' 
+            - Name: TODOFILES_BUCKET_CDN
+              Value: !GetAtt 'TodoFilesBucketCF.DomainName' 
+        - Name: !Sub '${AWS::StackName}-files-service'
+          Cpu: 20
+          Essential: False
+          Image: !Join [ '', [!Ref "AWS::AccountId", ".dkr.ecr.", !Ref 'AWS::Region', '.amazonaws.com/', !Ref 'AWS::StackName', '/todo-files-service:latest']]
+          Memory: 200
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CloudwatchLogsGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: !Sub '${AWS::StackName}-files-service'
+          PortMappings:
+            - ContainerPort: 8081
+          Environment:
+            - Name: TODO_TABLE
+              Value: !Ref TodoTable
+            - Name: TODOFILES_TABLE
+              Value: !Ref TodoFilesTable 
+            - Name: TODOFILES_BUCKET
+              Value: !Ref 'TodoFilesBucket' 
+            - Name: TODOFILES_BUCKET_CDN
+              Value: !GetAtt 'TodoFilesBucketCF.DomainName' 
+
+  EcsService:
+    Type: 'AWS::ECS::Service'
+    DependsOn: ALBListener
+    Properties:
+      ServiceName: !Sub '${AWS::StackName}-EcsService'
+      Cluster: !Ref ECSCluster
+      LaunchType: EC2
+      DeploymentConfiguration: 
+        MaximumPercent: 400
+        MinimumHealthyPercent: 100
+      DesiredCount: 2
+      #NetworkConfiguration: 
+      #  AwsvpcConfiguration:
+      #    AssignPublicIp: "DISABLED"
+      #    SecurityGroups: 
+      #      - !Ref EcsContainerSecurityGroup
+      #    Subnets: 
+      #      - !Ref PrivateOne
+      #      - !Ref PrivateTwo
+      PlacementStrategies:
+        - Type: spread
+          Field: attribute:ecs.availability-zone
+        - Type: binpack
+          Field: memory
+      LoadBalancers:
+        - ContainerName: !Sub '${AWS::StackName}-main-service'
+          ContainerPort: 8080
+          TargetGroupArn: !Ref ECSTGMain
+        - ContainerName: !Sub '${AWS::StackName}-files-service'
+          ContainerPort: 8081
+          TargetGroupArn: !Ref ECSTGFiles
+      #Role: !Ref EcsServiceRole
+      TaskDefinition: !Ref 'EcsTaskDefinition'
+
+  ECSALB:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Name: !Sub '${AWS::StackName}-ALB'
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets: 
+        - !Ref PublicOne
+        - !Ref PublicTwo
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    DependsOn: EcsServiceRole
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ECSTGMain
+      LoadBalancerArn: !Ref ECSALB
+      Port: 80
+      Protocol: HTTP
+
+  ECSALBListenerRuleMain:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ECSTGMain
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '*/todos*'
+      ListenerArn: !Ref ALBListener
+      Priority: 1
+  
+  ECSALBListenerRuleFiles:
+    Type: 'AWS::ElasticLoadBalancingV2::ListenerRule'
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref ECSTGFiles
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - '*/files*'
+      ListenerArn: !Ref ALBListener
+      Priority: 2
+
+  ECSTGMain:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 120
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 6
+      HealthyThresholdCount: 5
+      Name: !Sub '${AWS::StackName}-TG-main'
+      Port: 8080
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC
+  
+  ECSTGFiles:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckIntervalSeconds: 120
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 6
+      HealthyThresholdCount: 5
+      Name: !Sub '${AWS::StackName}-TG-files'
+      Port: 8081
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC
+
+  ECSAutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PrivateOne
+        - !Ref PrivateTwo
+      LaunchConfigurationName: !Ref ContainerInstances
+      MinSize: "1"
+      MaxSize: "3"
+      DesiredCapacity: "2"
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingReplacingUpdate:
+        WillReplace: 'true'
+
+  ServiceScalingTarget:
+    Type: 'AWS::ApplicationAutoScaling::ScalableTarget'
+    DependsOn: EcsService
+    Properties:
+      MaxCapacity: 4
+      MinCapacity: 2
+      ResourceId: !Join [ '', ['service/', !Ref ECSCluster, '/', !GetAtt 'EcsService.Name'] ]
+      RoleARN: !GetAtt 'AutoscalingRole.Arn'
+      ScalableDimension: 'ecs:service:DesiredCount'
+      ServiceNamespace: ecs
+
+  ServiceScalingPolicy:
+    Type: 'AWS::ApplicationAutoScaling::ScalingPolicy'
+    Properties:
+      PolicyName: !Sub '${AWS::StackName}-Service-ScalingPolicy'
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ServiceScalingTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: PercentChangeInCapacity
+        Cooldown: 60
+        MetricAggregationType: Average
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: 200
+
+  ALB500sAlarmScaleUp:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: 1
+      Statistic: Average
+      Threshold: 10
+      AlarmDescription: Alarm if our ALB generates too many HTTP 500s.
+      Period: 60
+      AlarmActions:
+        - !Ref ServiceScalingPolicy
+      Namespace: AWS/ApplicationELB
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt 'ECSALB.LoadBalancerFullName'
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: HTTPCode_ELB_5XX_Count
+
+  EC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecs:CreateCluster'
+                  - 'ecs:DeregisterContainerInstance'
+                  - 'ecs:DiscoverPollEndpoint'
+                  - 'ecs:Poll'
+                  - 'ecs:RegisterContainerInstance'
+                  - 'ecs:StartTelemetrySession'
+                  - 'ecs:Submit*'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+
+  AutoscalingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: service-autoscaling
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'application-autoscaling:*'
+                  - 'cloudwatch:DescribeAlarms'
+                  - 'cloudwatch:PutMetricAlarm'
+                  - 'ecs:DescribeServices'
+                  - 'ecs:UpdateService'
+                Resource: '*'
+
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2Role
+
+  ContainerInstances:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      LaunchConfigurationName: !Sub '${AWS::StackName}-LauchConfiguration'
+      ImageId: !FindInMap 
+        - RegionMap
+        - !Ref 'AWS::Region'
+        - ami
+      SecurityGroups:
+        - !Ref EcsContainerSecurityGroup
+      InstanceType: 't3.small'
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: !Sub '${AWS::StackName}-ec2-keypair'
+      UserData: 
+        Fn::Base64: 
+          Fn::Join:
+            - ''
+            - - |
+                #!/bin/bash -xe
+              - echo ECS_CLUSTER=
+              - !Ref ECSCluster
+              - |2
+                >> /etc/ecs/ecs.config
+              - |
+                yum install -y aws-cfn-bootstrap
+              - '/opt/aws/bin/cfn-signal -e $? '
+              - '         --stack '
+              - !Ref 'AWS::StackName'
+              - '         --resource ECSAutoScalingGroup '
+              - '         --region '
+              - !Ref 'AWS::Region'
+              - |+
+            
+  # Rest API for main service
+  TodoEcsMainApi:
+    Type: AWS::Serverless::Api
+    DependsOn: ECSALB
+    Properties:
+      StageName: dev
+      DefinitionBody: 
+        openapi: "3.0.1"
+        info:
+          title: !Sub '${AWS::StackName}-main-service'
+          version: "1.0"
+        securityDefinitions:
+          TodoAuthorizer:
+            type: apiKey
+            name: Authorization
+            in: header
+            x-amazon-apigateway-authtype: cognito_user_pools
+            x-amazon-apigateway-authorizer:
+              type: COGNITO_USER_POOLS
+              providerARNs:
+              - !Join [ '', ['arn:aws:cognito-idp:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':userpool/', !Ref TodoUserPool]]
+        paths:
+          /:
+            get:
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: "HTTP_PROXY"
+                httpMethod: "GET"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName', '/' ]]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+          /{userID}/todos:
+            get:
+              parameters:
+                - name: userID
+                  in: path
+                  required: true
+                  type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "2.0"
+                type: "HTTP_PROXY"
+                httpMethod: "GET"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                requestParameters:
+                  integration.request.path.userID: method.request.path.userID
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{userID}/todos'] ]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+          /{userID}/todos/{todoID}:
+            get:
+              parameters:
+                  - name: userID
+                    in: path
+                    required: true
+                    type: string
+                  - name: todoID
+                    in: path
+                    required: true
+                    type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "2.0"
+                type: "HTTP_PROXY"
+                httpMethod: "GET"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{userID}/todos/{todoID}'] ]
+                requestParameters:
+                  integration.request.path.userID: method.request.path.userID
+                  integration.request.path.todoID: method.request.path.todoID
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+          /{userID}/todos/add:
+            post:
+              parameters:
+                  - name: userID
+                    in: path
+                    required: true
+                    type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "2.0"
+                type: "HTTP_PROXY"
+                httpMethod: "POST"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                requestParameters:
+                  integration.request.path.userID: method.request.path.userID
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{userID}/todos/add'] ]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+          /{userID}/todos/{todoID}/delete:
+            delete:
+              parameters:
+                  - name: userID
+                    in: path
+                    required: true
+                    type: string
+                  - name: todoID
+                    in: path
+                    required: true
+                    type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                type: "HTTP_PROXY"
+                httpMethod: "DELETE"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                requestParameters:
+                  integration.request.path.userID: method.request.path.userID
+                  integration.request.path.todoID: method.request.path.todoID
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{userID}/todos/{todoID}/delete'] ]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+          /{userID}/todos/{todoID}/addnotes:
+            post:
+              parameters:
+                  - name: userID
+                    in: path
+                    required: true
+                    type: string
+                  - name: todoID
+                    in: path
+                    required: true
+                    type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "2.0"
+                type: "HTTP_PROXY"
+                httpMethod: "POST"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                requestParameters:
+                  integration.request.path.userID: method.request.path.userID
+                  integration.request.path.todoID: method.request.path.todoID
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{userID}/todos/{todoID}/addnotes'] ]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+          /{userID}/todos/{todoID}/complete:
+            post:
+              parameters:
+                  - name: userID
+                    in: path
+                    required: true
+                    type: string
+                  - name: todoID
+                    in: path
+                    required: true
+                    type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "2.0"
+                type: "HTTP_PROXY"
+                httpMethod: "POST"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                requestParameters:
+                  integration.request.path.userID: method.request.path.userID
+                  integration.request.path.todoID: method.request.path.todoID
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{userID}/todos/{todoID}/complete'] ]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+
+  # Rest API for files service
+  TodoEcsFilesApi:
+    Type: AWS::Serverless::Api
+    DependsOn: ECSALB
+    Properties:
+      StageName: dev
+      DefinitionBody: 
+        openapi: "3.0.1"
+        info:
+          title: !Join [ '-', [ !Ref 'AWS::StackName', 'files-service'] ]
+          version: "1.0"
+        securityDefinitions:
+          TodoAuthorizer:
+            type: apiKey
+            name: Authorization
+            in: header
+            x-amazon-apigateway-authtype: cognito_user_pools
+            x-amazon-apigateway-authorizer:
+              type: COGNITO_USER_POOLS
+              providerARNs:
+              - !Join [ '', ['arn:aws:cognito-idp:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':userpool/', !Ref TodoUserPool]]
+        paths:
+          /{todoID}/files:
+            get:
+              parameters:
+                - name: todoID
+                  in: path
+                  required: true
+                  type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "2.0"
+                type: "HTTP_PROXY"
+                httpMethod: "GET"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                requestParameters:
+                  integration.request.path.todoID: method.request.path.todoID
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{todoID}/files'] ]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+          /{todoID}/files/upload:
+            post:
+              parameters:
+                  - name: todoID
+                    in: path
+                    required: true
+                    type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "2.0"
+                type: "HTTP_PROXY"
+                httpMethod: "POST"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                requestParameters:
+                  integration.request.path.todoID: method.request.path.todoID
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{todoID}/files/upload'] ]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+          /{todoID}/files/{fileID}/delete:
+            delete:
+              parameters:
+                  - name: todoID
+                    in: path
+                    required: true
+                    type: string
+                  - name: fileID
+                    in: path
+                    required: true
+                    type: string
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+              security:
+              - TodoAuthorizer: []
+              x-amazon-apigateway-integration:
+                type: "HTTP_PROXY"
+                httpMethod: "DELETE"
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                requestParameters:
+                  integration.request.path.todoID: method.request.path.todoID
+                  integration.request.path.fileID: method.request.path.fileID
+                uri: !Join [ '', ['http://', !GetAtt 'ECSALB.DNSName','/{todoID}/files/{fileID}/delete'] ]
+                connectionType: "INTERNET"
+            options:
+              summary: CORS support
+              description: 'Enable CORS by returning correct headers
+
+                '
+              consumes:
+              - application/json
+              produces:
+              - application/json
+              tags:
+              - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                      "statusCode" : 200
+                    }
+                responses:
+                  default:
+                    statusCode: '200'
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+                      method.response.header.Access-Control-Allow-Methods: "'*'"
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                    responseTemplates:
+                      application/json: "{}\n"
+              responses:
+                '200':
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Origin:
+                      type: string
+
+Outputs:
+  CurrentRegion:
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub "${AWS::StackName}-CurrentRegion"
+  CurrentAccount:
+    Value: !Ref AWS::AccountId
+    Export:
+      Name: !Sub "${AWS::StackName}-CurrentAccount"
+  EcsServiceRoleArn:
+    Value: !GetAtt 'EcsServiceRole.Arn'
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsServiceRoleArn"
+  ECSTaskRoleArn:
+    Value: !GetAtt 'ECSTaskRole.Arn'
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSTaskRoleArn"
+  VPCId:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VPCId"
+  PublicSubnetOne:
+    Value: !Ref PublicOne
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetOne"
+  PublicSubnetTwo:
+    Value: !Ref PublicTwo
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetTwo"
+  PrivateSubnetOne:
+    Value: !Ref PrivateOne
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetOne"
+  EcsContainerSecurityGroup:
+    Value: !Ref 'EcsContainerSecurityGroup'
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsContainerSecurityGroup"
+  EcsService:
+    Value: !Ref EcsService
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsService"
+  EcsTaskDefinition:
+    Value: !Ref EcsTaskDefinition   
+    Export:
+      Name: !Sub "${AWS::StackName}-EcsTaskDefinition"
+  Ecscluster:
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSCluster"
+  ECSALB:
+    Description: Your ALB DNS URL
+    Value: !Join [ '', [ !GetAtt 'ECSALB.DNSName' ]]
+    Export:
+      Name: !Sub "${AWS::StackName}-ECSALB"
+  TodoEcsMainApi:
+    Value: !Join [ '', ['https://', !Ref TodoEcsMainApi, '.execute-api.', !Sub "${AWS::Region}", '.amazonaws.com/dev'] ]
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoEcsMainApiURL"
+  TodoEcsFilesApi:
+    Value: !Join [ '', ['https://', !Ref TodoEcsFilesApi, '.execute-api.', !Sub "${AWS::Region}", '.amazonaws.com/dev'] ]
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoEcsFilesApiURL"
+  TodoUserPoolId:
+    Value: !Ref TodoUserPool
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoUserPoolId"
+  TodoUserPoolArn:
+    Value: !GetAtt 'TodoUserPool.Arn'
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoUserPoolArn"
+  TodoUserPoolClientId:
+    Value: !Ref TodoUserPoolClient
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoUserPoolClientId"
+  TodoTable:
+    Value: !Ref TodoTable 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoTable"
+  TodoTableArn:
+    Value: !GetAtt 'TodoTable.Arn' 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoTableArn"
+  TodoFilesTable:
+    Value: !Ref TodoFilesTable 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoFilesTable"
+  TodoFilesTableArn:
+    Value: !GetAtt 'TodoFilesTable.Arn' 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoFilesTableArn"
+  TodoFilesBucket:
+    Value: !Ref 'TodoFilesBucket' 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoFilesBucket"
+  TodoFilesBucketCFDomainName:
+    Value: !GetAtt 'TodoFilesBucketCF.DomainName' 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoFilesBucketCFDomainName"
+  TodoFilesBucketArn:
+    Value: !GetAtt 'TodoFilesBucket.Arn' 
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoFilesBucketArn"
+  TodoIdentityPoolId:
+    Value: !Ref 'TodoIdentityPool'
+    Export:
+      Name: !Sub "${AWS::StackName}-TodoIdentityPoolId"
