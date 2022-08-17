@@ -4,7 +4,7 @@
 
 ### Backend
 
-**Update AWS region in functions**
+**Mettre a jour la region AWS dans les functions**
 
 ```
 REGION="REPLACE_ME_AWS_REGION"
@@ -13,7 +13,7 @@ sed -i '.old' "s/REPLACE_ME_AWS_REGION/$REGION/g" backend/attachments-service/to
 
 ```
 
-**Update application URL in functions (CORS)**
+**Mettre a jour l'URL de l'application dans les functions et le template core-resources (CORS)**
 
 ```
 URL="REPLACE_ME_APP_URL"
@@ -23,7 +23,7 @@ sed -i '.old' "s/REPLACE_ME_APP_URL/$URL/g" backend/core-resources/core-resource
 
 ```
 
-**Build the Docker images**
+**Création des images Docker**
 
 ```
 TODO_ECR_REPO=todo-app-ecs
@@ -39,7 +39,7 @@ docker build -t "$AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$TODO_ECR_REPO/to
 
 ```
 
-**Authenticate to ECRE and create 2 repositories**
+**Authentification ECR et création des repositories pour chaque image**
 
 ```
 # Authentification to ECR
@@ -53,7 +53,7 @@ aws ecr create-repository --repository-name "$TODO_ECR_REPO/todo-files-service" 
 
 ```
 
-**Push Docker images to the registry**
+**Upload des images Docker dans les repositories ECR**
 
 ```
 docker push $AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$TODO_ECR_REPO/todo-main-service:latest
@@ -61,13 +61,13 @@ docker push $AWS_ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$TODO_ECR_REPO/todo-fi
 
 ```
 
-**Deploy the core-resources stack**
+**Déployer le core-resources stack**
 
 ```
-# Create the keypair required to SSH onto the container instances
+# Créer la paire de clés requise pour SSH sur les instances de conteneur
 aws ec2 create-key-pair --key-name todo-app-ecs-ec2-keypair --region $REGION > key-pair.json
 
-# Deploy the core-resources stack
+# Déployer le core-resources
 cd backend/core-resources
 sam build -t core-resources.yaml 
 sam deploy --guided --capabilities CAPABILITY_NAMED_IAM
@@ -76,58 +76,58 @@ sam deploy --guided --capabilities CAPABILITY_NAMED_IAM
 
 ### Frontend
 
-Frontend resources (S3, CloudFront) are created by a CloudFormation stack
+Ici, les resources Frontend (S3, CloudFront) sont créées par un stack CloudFormation
 
-**AWS Console - Create the ACM certificate for our frontend in region us-east-1**
+**AWS Console - Créer le certificate ACM pour notre frontend dans la region us-east-1**
 
 **Déployer le core-website stack**
 
 ```
-# Replace the certificate ID in CloudFormation file
+# Remplacer le ID certificate dans le fichier CloudFormation
 CERTIFICATE_ID=REPLACE_ME_CERTIFICATE_ID
 sed -i '.old' "s/REPLACE_ME_CERTIFICATE_ID/$CERTIFICATE_ID/g" core-resources/core-website.yaml
 
-# Replace website URL in CloudFormation file
+# Remplacer l'URL du site web dans le fichier CloudFormation
 URL="todoecshpf.houessou.com"
 sed -i '.old' "s/REPLACE_ME_APP_URL/$URL/g" core-resources/core-website.yaml
 
-# Deploy the core-website stack
+# Déployer le core-website stack
 aws cloudformation create-stack --stack-name todo-app-ecs-web --template-body file://core-resources/core-website.yaml CAPABILITY_AUTO_EXPAND --region $REGION
 
 ```
 
-**Replace all necessary fields in the script.js file (see CloudFormation Outputs)**
+**Remplacer tous les champs necessaires dans le fichier script.js (voir CloudFormation Outputs)**
 
-To get stack Outputs without going to the AWS console:
+Pour obtenir les Outputs des stacks sans aller dans la console AWS:
 
 ```
 aws cloudformation describe-stacks --stack-name $TODO_ECR_REPO --region $REGION > output.json
 
 ```
 
-**Copy the contents of the frontend folder to the S3 bucket**
+**Copier le contenu du dossier frontend dans le bucket s3**
 
 ```
 aws s3 cp frontend s3://todo-app-ecs-web-aug-2708 --recursive --exclude "*.DS_Store" --region=$REGION
 
 ```
 
-## CI/CD Pipeline - GitHub Actions
+## Pipeline CI/CD - GitHub Actions
 
-**Create an IAM user with the right permissions set on the resources to deploy/update**
+**Créer un utilisateur IAM avec les bonnes permissions sur les resources à déployer/mettre à jour**
 
 ```
 AWS_ACCOUNT_ID=REPLACE_ME_ACCOUNT_ID
 
-# Create the user
+# Créer l'utilisateur
 aws iam create-user --user-name github-ecs-aug
 
-# Associate the Administrator permission (not recommended - always use the least privileges)
+# Associer la permission Administrator (non recommandé - toujours utiliser le moins de permissions requises)
 aws iam attach-user-policy --user-name github-ecs-aug --policy-arn "arn:aws:iam::aws:policy/AdministratorAccess"
 
-# Create an access key for the user
+# Créer un Access Key pour l'utilisateur
 aws iam create-access-key --user-name github-ecs-aug > access-key.json
 
-# !!! Delete the file containing the Access Key after use
+# !!! Supprimer le fichier contenant le Access Key après utilisation
 
 ```
