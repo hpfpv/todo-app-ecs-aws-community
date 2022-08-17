@@ -1,6 +1,6 @@
 ![app-components.png](https://cdn.hashnode.com/res/hashnode/image/upload/v1631737544541/-loHqk0vX.png)
 
-## Étapes de déploiement
+## Deployment steps
 
 ### Backend
 
